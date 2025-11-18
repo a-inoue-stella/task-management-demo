@@ -7,7 +7,7 @@
 
 // --- グローバル設定 ---
 // TODO: 1.1で取得した貴社（ステラリープ社）のテスト用Webhook URLを以下に設定してください
-const WEBHOOK_URL = "https://chat.googleapis.com/v1/spaces/XXXXX/messages?key=XXXXX&token=XXXXX";
+const WEBHOOK_URL = "https://chat.googleapis.com/v1/spaces/AAQAE5GiV-4/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=Pm8TnLfecpEVKOG8E-FLZ91NTQK--JUUP7gQSPs8GpE";
 const SHEET_NAME_TASKS = "タスク管理";
 const SHEET_NAME_ARCHIVE = "完了タスク";
 const SHEET_NAME_MASTER = "マスタ";
@@ -76,8 +76,11 @@ function checkDeadlines() {
       if (title !== "") {
         // 該当行へのリンクを生成 (FR-002-03)
         const rowLink = ss.getUrl() + "#gid=" + sheet.getSheetId() + "&range=A" + (i + 2);
-        
-        const payload = createChatCard(title, taskName, assignee, priority, rowLink, icon);
+        // 期限日を読みやすい形式に整形してカードに渡す
+        const timeZone = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone();
+        const dueDateStr = Utilities.formatDate(dueDate, timeZone, 'yyyy/MM/dd');
+
+        const payload = createChatCard(title, taskName, assignee, priority, dueDateStr, rowLink, icon);
         sendToChat(payload);
         notificationCount++;
         Utilities.sleep(500); // 連続送信によるAPI制限を回避
@@ -105,7 +108,7 @@ function archiveCompletedTasks() {
 
   // アーカイブシートがなければ作成 (ヘッダーコピー)
   if (!targetSheet) {
-    targetSheet = ss.insertSheet(ARCHIVE_SHEET_NAME);
+    targetSheet = ss.insertSheet(SHEET_NAME_ARCHIVE);
     sourceSheet.getRange(1, 1, 1, sourceSheet.getLastColumn()).copyTo(targetSheet.getRange(1, 1));
   }
 
@@ -161,11 +164,12 @@ function archiveCompletedTasks() {
  * @param {string} taskName - タスク名
  * @param {string} assignee - 担当者
  * @param {string} priority - 優先度
+ * @param {string} dueDateStr - 期限日を整形した文字列（例: "2025/11/18"）
  * @param {string} link - 該当行へのURL
  * @param {string} iconType - "WARNING" または "CLOCK"
  * @return {object} Google Chat Card v2 JSON object
  */
-function createChatCard(headerTitle, taskName, assignee, priority, link, iconType) {
+function createChatCard(headerTitle, taskName, assignee, priority, dueDateStr, link, iconType) {
   return {
     "cardsV2": [{
       "cardId": "task-reminder-" + new Date().getTime(), // 簡易的なユニークID
@@ -183,12 +187,32 @@ function createChatCard(headerTitle, taskName, assignee, priority, link, iconTyp
             { "decoratedText": { "startIcon": { "knownIcon": "DESCRIPTION" }, "text": "<b>タスク:</b> " + (taskName || "(未設定)") } },
             { "decoratedText": { "startIcon": { "knownIcon": "PERSON" }, "text": "<b>担当:</b> " + (assignee || "(未設定)") } },
             { "decoratedText": { "startIcon": { "knownIcon": "TICKET" }, "text": "<b>優先度:</b> " + (priority || "(未設定)") } },
+            { "decoratedText": { "startIcon": { "knownIcon": "CLOCK" }, "text": "<b>期限日:</b> " + (dueDateStr || "(未設定)") } },
             { "buttonList": { "buttons": [{ "text": "シートを開く", "onClick": { "openLink": { "url": link } } }] } }
           ]
         }]
       }
     }]
   };
+}
+
+/**
+ * カスタムメニューをスプレッドシートに追加します。
+ * - 「タスク管理」メニュー内に実行ボタンを配置します。
+ */
+function onOpen(e) {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('タスク管理')
+    .addItem('リマインドを送信 (期限チェック)', 'checkDeadlines')
+    .addItem('完了タスクをアーカイブ', 'archiveCompletedTasks')
+    .addToUi();
+}
+
+/**
+ * インストール時にもメニューを表示（Add-on 互換）
+ */
+function onInstall(e) {
+  onOpen(e);
 }
 
 /**
