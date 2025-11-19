@@ -1,110 +1,182 @@
 /**
- * [初期セットアップ用 - 追加機能]
- * デモ用の「ダッシュボード」シートを作成し、
- * 「タスク管理」シートのデータを自動集計する関数とグラフを配置します。
- *
- * @param {string} taskSheetName 集計対象のシート名（デフォルト: "タスク管理"）
+ * 【環境構築用スクリプト】
+ * この関数を実行すると、設計書通りのシート構造、入力規則、条件付き書式が一括で設定されます。
+ * ※既存のデータがある場合、シートが上書きされる可能性があるため、新規シートで実行してください。
  */
-function setupDashboard(taskSheetName = "タスク管理") {
+function setupEnvironment() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   
-  // 1. ダッシュボードシートの作成・初期化
-  let dashboardSheet = ss.getSheetByName("ダッシュボード");
-  if (!dashboardSheet) {
-    dashboardSheet = ss.insertSheet("ダッシュボード", 0); // 先頭にシートを挿入
+  // 1. シートの作成・取得
+  const sheetTask = getOrCreateSheet(ss, 'タスク管理');
+  const sheetConfig = getOrCreateSheet(ss, '設定');
+  const sheetLog = getOrCreateSheet(ss, 'ログ');
+
+  // 2. 「設定」シートの構築
+  setupConfigSheet(sheetConfig);
+
+  // 3. 「タスク管理」シートの構築
+  setupTaskSheet(sheetTask, sheetConfig);
+
+  // 4. 「ログ」シートの構築
+  setupLogSheet(sheetLog);
+
+  // 5. 初期シート（シート1等）の削除処理（任意）
+  const defaultSheet = ss.getSheetByName('シート1');
+  if (defaultSheet) ss.deleteSheet(defaultSheet);
+
+  Browser.msgBox("環境構築が完了しました！");
+}
+
+/**
+ * シートがあれば取得、なければ作成するユーティリティ
+ */
+function getOrCreateSheet(ss, sheetName) {
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
   }
-  dashboardSheet.clear(); // 既存の内容をクリア
-  dashboardSheet.setFrozenRows(1); // 1行目（タイトル行）を固定
+  return sheet;
+}
 
-  // -------------------------------------------------------
-  // 2. タイトル設定
-  // -------------------------------------------------------
-  dashboardSheet.getRange("A1").setValue("プロジェクト・ヘルスダッシュボード")
-    .setFontWeight("bold")
-    .setFontSize(18)
-    .setFontFamily("Arial");
-  // A1:G1セルを結合
-  dashboardSheet.getRange("A1:G1").merge();
-
-  // -------------------------------------------------------
-  // 3. ウィジェット①: 全体進捗サマリー
-  // -------------------------------------------------------
-  dashboardSheet.getRange("A3").setValue("① 全体進捗サマリー").setFontWeight("bold");
+/**
+ * 「設定」シートの中身を作成
+ */
+function setupConfigSheet(sheet) {
+  sheet.clear(); // 初期化
   
-  // 集計表の作成
-  const summaryData = [
-    ["ステータス", "件数"],
-    ["完了",        `=COUNTIF('${taskSheetName}'!D:D, "完了")`],
-    ["作業中",      `=COUNTIF('${taskSheetName}'!D:D, "作業中")`],
-    ["未着手",      `=COUNTIF('${taskSheetName}'!D:D, "未着手")`],
-    ["(リスク) 期限切れ", `=COUNTIFS('${taskSheetName}'!D:D, "<>完了", '${taskSheetName}'!E:E, "<"&TODAY())`]
+  // ヘッダー設定
+  const headers = [["担当者名", "Email", "Webhook URL", "", "ステータス定義"]];
+  sheet.getRange("A1:E1").setValues(headers).setFontWeight("bold").setBackground("#efefef");
+  
+  // ステータス定義（マスタデータ）の投入
+  const statuses = [
+    ["⚪️ 未着手"],
+    ["🔵 進行中"],
+    ["🟡 確認待ち"],
+    ["🟢 完了"]
   ];
-  
-  const summaryRange = dashboardSheet.getRange("A4:B8");
-  summaryRange.setValues(summaryData);
-  dashboardSheet.getRange("A4:B4").setFontWeight("bold").setBackground("#eeeeee");
-  dashboardSheet.getRange("A8:B8").setFontWeight("bold").setFontColor("red");
+  sheet.getRange("E2:E5").setValues(statuses);
 
-  // 円グラフの作成
-  const pieChartRange = dashboardSheet.getRange("A5:B7"); // 完了, 作業中, 未着手のみ
-  const pieChart = dashboardSheet.newChart()
-    .setChartType(Charts.ChartType.PIE)
-    .addRange(pieChartRange)
-    .setOption("title", "タスクステータス（全体）")
-    .setPosition(3, 3, 0, 0) // C3セルを基点に配置
+  // 列幅調整
+  sheet.setColumnWidth(2, 200); // Email列
+  sheet.setColumnWidth(3, 300); // Webhook URL列
+}
+
+/**
+ * 「タスク管理」シートの中身を作成（UI、入力規則、条件付き書式）
+ */
+function setupTaskSheet(sheet, configSheet) {
+  sheet.clear(); // 初期化
+  
+  // 1. ヘッダー設定
+  // I列以降はガントチャート用の日付を入れる（デモ用に30日分）
+  let headers = ["task_id", "タスク名", "担当者", "開始日", "期限日", "ステータス", "通知送信", "メモ"];
+  
+  // 日付ヘッダー生成（今日から30日分）
+  const today = new Date();
+  for (let i = 0; i < 30; i++) {
+    let d = new Date(today);
+    d.setDate(today.getDate() + i);
+    headers.push(Utilities.formatDate(d, 'JST', 'MM/dd'));
+  }
+  
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers])
+       .setFontWeight("bold")
+       .setBackground("#4c8bf5")
+       .setFontColor("white")
+       .setHorizontalAlignment("center");
+
+  // 列幅調整
+  sheet.setColumnWidth(1, 1);  // ID列はほぼ隠す
+  sheet.setColumnWidth(2, 250); // タスク名
+  sheet.setColumnWidth(7, 60);  // 通知チェックボックス
+  // ガントチャートエリア（I列以降）を細くする
+  sheet.setColumnWidths(9, 30, 25); 
+
+  // 固定行・列
+  sheet.setFrozenRows(1);
+  sheet.setFrozenColumns(2);
+
+  // 2. 入力規則（プルダウン・チェックボックス）の設定
+  const maxRow = 100; // 設定範囲
+
+  // C列：担当者（設定シートA列参照）
+  const ruleAssignee = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(configSheet.getRange("A2:A"))
+    .setAllowInvalid(false)
     .build();
-  dashboardSheet.insertChart(pieChart);
+  sheet.getRange(2, 3, maxRow, 1).setDataValidation(ruleAssignee);
 
-  // -------------------------------------------------------
-  // 4. ウィジェット②: 担当者別 負荷状況（最重要）
-  // -------------------------------------------------------
-  dashboardSheet.getRange("E3").setValue("② 担当者別 負荷状況 (未完了タスク)").setFontWeight("bold");
-  
-  // QUERY関数でデータソースを作成
-  const queryFormulaLoad = `=QUERY('${taskSheetName}'!A:E, 
-    "SELECT B, COUNT(B) 
-     WHERE D <> '完了' AND B IS NOT NULL 
-     GROUP BY B 
-     ORDER BY COUNT(B) DESC 
-     LABEL B '担当者', COUNT(B) '未完了タスク数'", 
-    1)`;
-  
-  const queryRangeLoad = dashboardSheet.getRange("E4");
-  queryRangeLoad.setFormula(queryFormulaLoad);
-
-  // 横棒グラフの作成
-  const barChart = dashboardSheet.newChart()
-    .setChartType(Charts.ChartType.BAR)
-    .addRange(queryRangeLoad) // QUERY結果を動的に参照
-    .setOption("title", "担当者別 未完了タスク数")
-    .setOption("legend", { position: "none" })
-    .setOption("hAxis", { title: "件数" })
-    .setPosition(4, 5, 0, 0) // E4セルを基点に配置
+  // F列：ステータス（設定シートE列参照）
+  const ruleStatus = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(configSheet.getRange("E2:E5"))
+    .setAllowInvalid(false)
     .build();
-  dashboardSheet.insertChart(barChart);
+  sheet.getRange(2, 6, maxRow, 1).setDataValidation(ruleStatus);
 
-  // -------------------------------------------------------
-  // 5. ウィジェット③: リスク管理
-  // -------------------------------------------------------
-  dashboardSheet.getRange("A10").setValue("③ リスク管理 (優先度別 期限切れタスク)").setFontWeight("bold");
+  // G列：通知送信（チェックボックス）
+  const ruleCheck = SpreadsheetApp.newDataValidation()
+    .requireCheckbox()
+    .build();
+  sheet.getRange(2, 7, maxRow, 1).setDataValidation(ruleCheck);
 
-  // QUERY関数でデータソースを作成
-  const queryFormulaRisk = `=QUERY('${taskSheetName}'!A:E, 
-    "SELECT C, COUNT(C) 
-     WHERE D <> '完了' AND E < TODAY() AND C IS NOT NULL 
-     GROUP BY C 
-     ORDER BY C ASC 
-     LABEL C '優先度', COUNT(C) '期限切れ件数'", 
-    1)`;
-  
-  const queryRangeRisk = dashboardSheet.getRange("A11");
-  queryRangeRisk.setFormula(queryFormulaRisk);
-  
-  // リスクテーブルの書式設定（グラフの代わり）
-  dashboardSheet.getRange("A11:B11").setFontWeight("bold").setBackground("#eeeeee");
-  
-  // -------------------------------------------------------
-  // 6. 完了通知
-  // -------------------------------------------------------
-  SpreadsheetApp.getUi().alert("ダッシュボードシートの構築が完了しました！");
+  // D, E列：日付
+  const ruleDate = SpreadsheetApp.newDataValidation()
+    .requireDate()
+    .build();
+  sheet.getRange(2, 4, maxRow, 2).setDataValidation(ruleDate);
+
+
+  // 3. 条件付き書式の設定
+  const rules = [];
+  const rangeAll = sheet.getRange("A2:Z100");
+  const rangeGantt = sheet.getRange("I2:AL100"); // ガントチャートエリア
+
+  // ① 完了行のグレーアウト
+  // 数式: =$F2="🟢 完了"
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=$F2="🟢 完了"')
+    .setBackground("#eeeeee")
+    .setFontColor("#aaaaaa")
+    .setRanges([rangeAll])
+    .build());
+
+  // ② 確認待ちのハイライト
+  // 数式: =$F2="🟡 確認待ち"
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=$F2="🟡 確認待ち"')
+    .setBackground("#fff9c4") // 薄い黄色
+    .setRanges([rangeAll])
+    .build());
+
+  // ③ 遅延アラート（赤）
+  // 数式: =AND($F2<>"🟢 完了", $E2 < TODAY(), $E2<>"")
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND($F2<>"🟢 完了", $E2 < TODAY(), $E2<>"")')
+    .setBackground("#ffcdd2") // 薄い赤
+    .setFontColor("#c62828")
+    .setRanges([rangeAll])
+    .build());
+
+  // ④ ガントチャートのバー表示（青）
+  // 数式: =AND(I$1>=$D2, I$1<=$E2)
+  // ※GASで設定する場合、R1C1形式の方が安定するためR1C1で記述
+  //   I$1 -> R1C[0] (相対列の1行目)
+  //   $D2 -> RC4 (固定D列の相対行)
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND(R1C[0]>=RC4, R1C[0]<=RC5)')
+    .setBackground("#4285f4") // Google Blue
+    .setRanges([rangeGantt])
+    .build());
+
+  sheet.setConditionalFormatRules(rules);
+}
+
+/**
+ * 「ログ」シートの中身を作成
+ */
+function setupLogSheet(sheet) {
+  sheet.clear();
+  const headers = [["日時", "タスク名", "ステータス", "実行者", "結果"]];
+  sheet.getRange("A1:E1").setValues(headers).setFontWeight("bold").setBackground("#efefef");
 }
