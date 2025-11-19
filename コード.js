@@ -22,7 +22,7 @@ const CONFIG = {
  * ユーザーが操作した瞬間に動く関数です。
  * 負荷対策のため「タスク管理シートのG列がチェックされた時」以外は即終了させます。
  */
-function onEdit(e) {
+function handleEdit(e) {
   const range = e.range;
   const sheet = range.getSheet();
 
