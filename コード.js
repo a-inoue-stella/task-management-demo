@@ -77,29 +77,25 @@ function processNotification(sheet, rowIndex) {
  */
 function createCardPayload(taskName, assigneeName, deadlineObj, status) {
   const sheetUrl = SpreadsheetApp.getActiveSpreadsheet().getUrl();
-  
-  // 日付の整形
   const deadlineStr = deadlineObj ? Utilities.formatDate(deadlineObj, 'JST', 'yyyy/MM/dd') : '未設定';
 
-  // デフォルト設定（通常通知）
+  // デフォルト設定（通常通知：ベル）
   let headerTitle = "【通知】タスク更新";
   let headerSubtitle = "タスク管理Botより";
-  // Google FontsのMaterial Symbolsアイコン（標準的なベル）
-  let headerIcon = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/notifications/default/48px.png"; 
-  let headerStyle = "SQUARE"; // アイコンを四角く大きく表示
+  let headerIcon = "https://www.gstatic.com/images/icons/material/system/2x/notifications_black_48dp.png";
+  let headerStyle = "SQUARE"; 
 
   // ステータスに応じたデザイン切り替え
   if (status === "🟡 確認待ち") {
     headerTitle = "🟡 【確認依頼】承認をお願いします";
-    // 人とバインダーのアイコン
-    headerIcon = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/assignment_ind/default/48px.png";
+    // 人型アイコン
+    headerIcon = "https://www.gstatic.com/images/icons/material/system/2x/account_circle_black_48dp.png";
   } else if (status === "🟢 完了") {
     headerTitle = "🟢 【完了】タスクが完了しました";
     // チェックマーク
-    headerIcon = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/check_circle/default/48px.png";
+    headerIcon = "https://www.gstatic.com/images/icons/material/system/2x/check_circle_black_48dp.png";
   }
 
-  // カード構造の定義
   const card = {
     "cardsV2": [
       {
@@ -109,7 +105,7 @@ function createCardPayload(taskName, assigneeName, deadlineObj, status) {
             "title": headerTitle,
             "subtitle": headerSubtitle,
             "imageUrl": headerIcon,
-            "imageType": headerStyle // ここでアイコンの形状を指定
+            "imageType": headerStyle
           },
           "sections": [
             {
@@ -190,7 +186,6 @@ function sendReminders() {
 
   const data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
   
-  // 日付比較用の基準日作成（時間を00:00:00に統一）
   const today = new Date();
   today.setHours(0,0,0,0);
   
@@ -211,43 +206,39 @@ function sendReminders() {
     const status   = row[CONFIG.COL_STATUS - 1];
     const assignee = row[CONFIG.COL_ASSIGNEE - 1];
 
-    // 完了済み、タスク名なし、期限なしは無視
     if (status === "🟢 完了" || !taskName || !deadlineStr) return;
 
     const deadline = new Date(deadlineStr);
     deadline.setHours(0,0,0,0);
 
-    // 判定ロジック
     let title = "";
     let iconUrl = "";
     let isTarget = false;
 
     if (deadline.getTime() < today.getTime()) {
-      // ① 期限切れ
+      // ① 期限切れ（ビックリマーク）※ご提示いただいたURL
       title = "🔥 【遅延】期限が過ぎています！";
-      iconUrl = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/local_fire_department/default/48px.png"; // 火
+      iconUrl = "https://www.gstatic.com/images/icons/material/system/2x/warning_amber_black_48dp.png";
       isTarget = true;
     } else if (deadline.getTime() === today.getTime()) {
-      // ② 今日が期限
+      // ② 今日が期限（時計）※ご提示いただいたURL
       title = "⏰ 【今日】本日が対応期限です";
-      iconUrl = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/alarm/default/48px.png"; // 時計
+      iconUrl = "https://www.gstatic.com/images/icons/material/system/2x/alarm_black_48dp.png";
       isTarget = true;
     } else if (deadline.getTime() === tomorrow.getTime()) {
-      // ③ 明日が期限
+      // ③ 明日が期限（カレンダー）
       title = "⚠️ 【明日】明日が期限です";
-      iconUrl = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/upcoming/default/48px.png"; // 今後の予定
+      iconUrl = "https://www.gstatic.com/images/icons/material/system/2x/event_black_48dp.png";
       isTarget = true;
     }
 
-    // 送信処理
     if (isTarget) {
        let payload = createCardPayload(taskName, assignee, deadline, status);
        
        // ヘッダーをアラート用に上書き
        payload.cardsV2[0].card.header.title = title;
        payload.cardsV2[0].card.header.imageUrl = iconUrl;
-       // アイコンを大きく強調表示
-       payload.cardsV2[0].card.header.imageType = "SQUARE"; 
+       payload.cardsV2[0].card.header.imageType = "SQUARE"; // ここもSQUAREにします
        
        sendCard(webhookUrl, payload);
        alertCount++;
@@ -258,7 +249,7 @@ function sendReminders() {
   if(alertCount > 0) {
     Browser.msgBox(`送信完了：${alertCount}件のリマインドを送信しました`);
   } else {
-    Browser.msgBox("リマインド対象（遅延・今日・明日）はありません");
+    Browser.msgBox("リマインド対象はありません");
   }
 }
 
