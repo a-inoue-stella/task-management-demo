@@ -52,13 +52,18 @@ function processNotification(sheet, rowIndex) {
       
       // カードペイロードの生成
       const payload = createCardPayload(taskName, assignee, deadline, status);
-      
+
       const webhookUrl = getWebhookUrl();
-      if(webhookUrl) {
-        sendCard(webhookUrl, payload);
-        writeLog(taskName, status, assignee, "送信成功");
+      if (webhookUrl) {
+        const res = sendCard(webhookUrl, payload, { task: taskName, status: status, user: assignee, context: 'processNotification:row' + rowIndex });
+        if (res && res.success) {
+          writeLog(taskName, status, assignee, "送信成功", 'processNotification:row' + rowIndex);
+        } else {
+          writeLog(taskName, status, assignee, "送信失敗: " + (res && res.error ? res.error : 'Unknown'), 'processNotification:row' + rowIndex);
+        }
       } else {
-        Browser.msgBox("エラー：Webhook URL未設定");
+        // 自動処理ではダイアログを表示しない。代わりにログを書く。
+        writeLog(taskName, status, assignee, "送信失敗: Webhook URL未設定", 'processNotification:row' + rowIndex);
       }
 
       sheet.getRange(rowIndex, CONFIG.COL_TRIGGER).setValue(false);
@@ -77,7 +82,7 @@ function processNotification(sheet, rowIndex) {
  */
 function createCardPayload(taskName, assigneeName, deadlineObj, status) {
   const sheetUrl = SpreadsheetApp.getActiveSpreadsheet().getUrl();
-  const deadlineStr = deadlineObj ? Utilities.formatDate(deadlineObj, 'JST', 'yyyy/MM/dd') : '未設定';
+  const deadlineStr = deadlineObj ? formatDate(deadlineObj, 'yyyy/MM/dd') : '未設定';
 
   // デフォルト設定（通常通知：ベル）
   let headerTitle = "【通知】タスク更新";
@@ -233,16 +238,22 @@ function sendReminders() {
     }
 
     if (isTarget) {
-       let payload = createCardPayload(taskName, assignee, deadline, status);
-       
-       // ヘッダーをアラート用に上書き
-       payload.cardsV2[0].card.header.title = title;
-       payload.cardsV2[0].card.header.imageUrl = iconUrl;
-       payload.cardsV2[0].card.header.imageType = "SQUARE"; // ここもSQUAREにします
-       
-       sendCard(webhookUrl, payload);
-       alertCount++;
-       Utilities.sleep(500); 
+      let payload = createCardPayload(taskName, assignee, deadline, status);
+
+      // ヘッダーをアラート用に上書き
+      payload.cardsV2[0].card.header.title = title;
+      payload.cardsV2[0].card.header.imageUrl = iconUrl;
+      payload.cardsV2[0].card.header.imageType = "SQUARE"; // ここもSQUAREにします
+
+      const res = sendCard(webhookUrl, payload, { task: taskName, status: status, user: assignee, context: 'sendReminders' });
+      if (res && res.success) {
+        writeLog(taskName, status, assignee, '送信成功', 'sendReminders');
+      } else {
+        writeLog(taskName, status, assignee, '送信失敗: ' + (res && res.error ? res.error : 'Unknown'), 'sendReminders');
+      }
+
+      alertCount++;
+      Utilities.sleep(500);
     }
   });
 
@@ -257,29 +268,96 @@ function sendReminders() {
 
 // カード送信関数（JSONをそのまま送る）
 function sendCard(url, payload) {
+  // 第3引数 meta: { task, status, user, context }
+  // 戻り値: { success: boolean, error?: string }
+  const meta = arguments.length >= 3 ? arguments[2] : null;
   const options = {
     method: 'post',
     contentType: 'application/json',
     payload: JSON.stringify(payload)
   };
-  UrlFetchApp.fetch(url, options);
+
+  const maxAttempts = 3;
+  let attempt = 0;
+  while (attempt < maxAttempts) {
+    try {
+      attempt++;
+      const resp = UrlFetchApp.fetch(url, options);
+      const code = resp.getResponseCode ? resp.getResponseCode() : 200;
+      if (code >= 200 && code < 300) {
+        return { success: true };
+      } else {
+        const body = resp.getContentText ? resp.getContentText() : '';
+        const err = `HTTP ${code} ${body}`;
+        if (attempt >= maxAttempts) return { success: false, error: err };
+        Utilities.sleep(500 * attempt);
+      }
+    } catch (e) {
+      const errMsg = e && e.message ? e.message : String(e);
+      if (attempt >= maxAttempts) return { success: false, error: errMsg };
+      Utilities.sleep(500 * attempt);
+    }
+  }
+  return { success: false, error: 'Unknown' };
 }
 
 function getWebhookUrl() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_SETTING);
-  return sheet.getRange(CONFIG.CELL_WEBHOOK).getValue();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEET_SETTING);
+  if (!sheet) {
+    Logger.log('設定シートが見つかりません: ' + CONFIG.SHEET_SETTING);
+    return null;
+  }
+  const val = sheet.getRange(CONFIG.CELL_WEBHOOK).getValue();
+  if (!val) return null;
+  return String(val).trim();
 }
 
 function getUserMap() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_SETTING);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEET_SETTING);
+  if (!sheet) {
+    Logger.log('設定シートが見つかりません: ' + CONFIG.SHEET_SETTING);
+    return {};
+  }
   const data = sheet.getRange(CONFIG.RANGE_USER_MAP).getValues();
   let map = {};
-  data.forEach(row => { if(row[0] && row[1]) map[row[0]] = row[1]; });
+  data.forEach(row => { if (row[0] && row[1]) map[row[0]] = row[1]; });
   return map;
 }
 
-function writeLog(task, status, user, result) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_LOG);
-  const date = Utilities.formatDate(new Date(), 'JST', 'yyyy/MM/dd HH:mm:ss');
-  sheet.appendRow([date, task, status, user, result]);
+function writeLog(task, status, user, result, context) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEET_LOG);
+  const date = formatDate(new Date(), 'yyyy/MM/dd HH:mm:ss');
+  try {
+    if (!sheet) {
+      Logger.log(`[writeLog] ログシートが見つかりません。${date} ${task} ${status} ${user} ${result} ${context || ''}`);
+      return;
+    }
+    sheet.appendRow([date, task, status, user, result, context || '']);
+  } catch (e) {
+    Logger.log('[writeLog] 例外: ' + e && e.message ? e.message : String(e));
+  }
+}
+
+/**
+ * タイムゾーンに基づいて日付文字列を返すヘルパー
+ * @param {Date} d
+ * @param {string} fmt
+ */
+function getTimeZone() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  return (ss && ss.getSpreadsheetTimeZone) ? ss.getSpreadsheetTimeZone() : Session.getScriptTimeZone();
+}
+
+function formatDate(d, fmt) {
+  if (!d) return '';
+  const tz = getTimeZone() || 'JST';
+  try {
+    return Utilities.formatDate(d, tz, fmt || 'yyyy/MM/dd');
+  } catch (e) {
+    // fallback
+    return Utilities.formatDate(d, 'JST', fmt || 'yyyy/MM/dd');
+  }
 }
