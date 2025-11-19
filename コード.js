@@ -1,83 +1,71 @@
 /**
  * 【設定エリア】
- * シートの列番号が変わった場合はここを修正してください。
  */
 const CONFIG = {
   SHEET_TASK: 'タスク管理',
   SHEET_SETTING: '設定',
   SHEET_LOG: 'ログ',
-  // 列番号（A列=1, B列=2...）
-  COL_TASK_NAME: 2,   // B列: タスク名
-  COL_ASSIGNEE: 3,    // C列: 担当者
-  COL_DEADLINE: 5,    // E列: 期限日
-  COL_STATUS: 6,      // F列: ステータス
-  COL_TRIGGER: 7,     // G列: 通知送信（チェックボックス）
-  // 設定シートのセル位置
-  CELL_WEBHOOK: 'C2',     // Webhook URL
-  RANGE_USER_MAP: 'A2:B20' // 担当者マスタ範囲
+  // 列番号
+  COL_TASK_NAME: 2,
+  COL_ASSIGNEE: 3,
+  COL_DEADLINE: 5,
+  COL_STATUS: 6,
+  COL_TRIGGER: 7,
+  // 設定シート位置
+  CELL_WEBHOOK: 'C2',
+  RANGE_USER_MAP: 'A2:B20'
 };
 
 /**
- * 1. トリガー関数 (onEdit)
- * ユーザーが操作した瞬間に動く関数です。
- * 負荷対策のため「タスク管理シートのG列がチェックされた時」以外は即終了させます。
+ * 0. メニューバーの作成 (onOpen)
+ * シートを開いた時に自動実行され、メニューバーにカスタムメニューを追加します。
  */
-function handleEdit(e) {
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('⚡️ タスク管理デモ') // メニュー名
+    .addItem('🔔 リマインドを実行', 'sendReminders') // 項目名, 実行する関数名
+    .addToUi();
+}
+
+/* --- 1. トリガー制御 --- */
+function handleEdit(e) { // 関数名は手動トリガー設定に合わせてください
   const range = e.range;
   const sheet = range.getSheet();
 
-  // ガード節：無関係な編集は無視して負荷を下げる
   if (sheet.getName() !== CONFIG.SHEET_TASK) return;
   if (range.getColumn() !== CONFIG.COL_TRIGGER) return;
-  if (e.value !== "TRUE") return; // チェックON以外（OFFにした時など）は無視
+  if (e.value !== "TRUE") return;
 
-  // 通知処理を実行
   processNotification(sheet, range.getRow());
 }
 
-/**
- * 2. 通知処理の実行 (排他制御付き)
- * 複数人が同時にチェックしてもバッティングしないよう制御します。
- */
+/* --- 2. 通知処理実行 --- */
 function processNotification(sheet, rowIndex) {
   const lock = LockService.getScriptLock();
-  
-  // ロック取得（最大10秒待機）
   if (lock.tryLock(10000)) {
     try {
-      // 必要なデータを一行分取得
-      // getRange(行, 列, 行数, 列数) -> 1行目のデータ全体を取得
       const data = sheet.getRange(rowIndex, 1, 1, 10).getValues()[0];
-      
       const taskName = data[CONFIG.COL_TASK_NAME - 1];
       const assignee = data[CONFIG.COL_ASSIGNEE - 1];
+      const deadline = data[CONFIG.COL_DEADLINE - 1]; // 日付オブジェクト
       const status   = data[CONFIG.COL_STATUS - 1];
       
-      // 1. メッセージを作る
-      const message = createMessage(taskName, assignee, status);
+      // カードペイロードの生成
+      const payload = createCardPayload(taskName, assignee, deadline, status);
       
-      // 2. チャットに送る
       const webhookUrl = getWebhookUrl();
       if(webhookUrl) {
-        sendChat(webhookUrl, message);
+        sendCard(webhookUrl, payload);
         writeLog(taskName, status, assignee, "送信成功");
       } else {
-        Browser.msgBox("エラー：設定シート(C2)にWebhook URLが設定されていません");
-        writeLog(taskName, status, assignee, "エラー：URL未設定");
+        Browser.msgBox("エラー：Webhook URL未設定");
       }
 
-      // 3. チェックボックスをOFFに戻す（処理完了の合図）
       sheet.getRange(rowIndex, CONFIG.COL_TRIGGER).setValue(false);
-
-      // 4. 完了トーストを表示（画面右下に小さく出る）
-      SpreadsheetApp.getActiveSpreadsheet().toast(`「${taskName}」の通知を送信しました`, "完了");
 
     } catch (e) {
       console.error(e);
-      writeLog("システムエラー", "エラー", "不明", e.message);
-      // エラーでもチェックは戻す
       sheet.getRange(rowIndex, CONFIG.COL_TRIGGER).setValue(false);
-      SpreadsheetApp.getActiveSpreadsheet().toast("エラーが発生しました", "失敗");
     } finally {
       lock.releaseLock();
     }
@@ -85,50 +73,110 @@ function processNotification(sheet, rowIndex) {
 }
 
 /**
- * 3. メッセージ生成ロジック
- * ステータスに応じて文面とアイコンを変えます。
+ * ★修正版：大きなアイコン付きのカードを作る関数
  */
-function createMessage(taskName, assigneeName, status) {
-  const userMap = getUserMap();
-  const email = userMap[assigneeName];
-  
-  // Emailがあればメンション化、なければ名前だけ
-  const mention = email ? `<users/${email}>` : assigneeName;
+function createCardPayload(taskName, assigneeName, deadlineObj, status) {
   const sheetUrl = SpreadsheetApp.getActiveSpreadsheet().getUrl();
-
-  let header = "";
-  let body = "";
   
+  // 日付の整形
+  const deadlineStr = deadlineObj ? Utilities.formatDate(deadlineObj, 'JST', 'yyyy/MM/dd') : '未設定';
+
+  // デフォルト設定（通常通知）
+  let headerTitle = "【通知】タスク更新";
+  let headerSubtitle = "タスク管理Botより";
+  // Google FontsのMaterial Symbolsアイコン（標準的なベル）
+  let headerIcon = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/notifications/default/48px.png"; 
+  let headerStyle = "SQUARE"; // アイコンを四角く大きく表示
+
+  // ステータスに応じたデザイン切り替え
   if (status === "🟡 確認待ち") {
-    // 確認待ちは目立つように
-    header = `*🟡 【確認依頼】タスクの確認をお願いします*`;
-    body = `担当者：${assigneeName} さんより\nステータスが「確認待ち」になりました。`;
+    headerTitle = "🟡 【確認依頼】承認をお願いします";
+    // 人とバインダーのアイコン
+    headerIcon = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/assignment_ind/default/48px.png";
   } else if (status === "🟢 完了") {
-    // 完了はポジティブに
-    header = `*🟢 【完了】タスクが完了しました！*`;
-    body = `担当者：${mention} お疲れ様でした！`;
-  } else if (status === "🔵 進行中") {
-    header = `*🔵 【着手】タスクを開始しました*`;
-    body = `担当者：${mention}`;
-  } else {
-    // その他
-    header = `*🔄 【更新】タスク状況が変わりました*`;
-    body = `担当者：${mention}\n現在：${status}`;
+    headerTitle = "🟢 【完了】タスクが完了しました";
+    // チェックマーク
+    headerIcon = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/check_circle/default/48px.png";
   }
 
-  // 統合メッセージ
-  const text = `${header}\n` +
-               `タスク：*${taskName}*\n` +
-               `${body}\n` +
-               `──────────────\n` +
-               `<${sheetUrl}|📂 スプレッドシートを開く>`;
-  
-  return text;
+  // カード構造の定義
+  const card = {
+    "cardsV2": [
+      {
+        "cardId": "unique-card-id",
+        "card": {
+          "header": {
+            "title": headerTitle,
+            "subtitle": headerSubtitle,
+            "imageUrl": headerIcon,
+            "imageType": headerStyle // ここでアイコンの形状を指定
+          },
+          "sections": [
+            {
+              "widgets": [
+                {
+                  "decoratedText": {
+                    "startIcon": { "knownIcon": "DESCRIPTION" },
+                    "topLabel": "タスク",
+                    "text": `<b>${taskName}</b>`,
+                    "wrapText": true
+                  }
+                },
+                {
+                  "decoratedText": {
+                    "startIcon": { "knownIcon": "PERSON" },
+                    "topLabel": "担当",
+                    "text": `<b>${assigneeName}</b>`
+                  }
+                },
+                {
+                  "decoratedText": {
+                    "startIcon": { "knownIcon": "BOOKMARK" },
+                    "topLabel": "ステータス",
+                    "text": `<b>${status}</b>`
+                  }
+                },
+                {
+                  "decoratedText": {
+                    "startIcon": { "knownIcon": "CLOCK" },
+                    "topLabel": "期限日",
+                    "text": `<b>${deadlineStr}</b>`
+                  }
+                }
+              ]
+            },
+            {
+              "widgets": [
+                {
+                  "buttonList": {
+                    "buttons": [
+                      {
+                        "text": "シートを開く",
+                        "onClick": {
+                          "openLink": {
+                            "url": sheetUrl
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  };
+
+  return card;
 }
 
 /**
- * 4. リマインド機能（デモボタン用）
- * 期限切れタスクを吸い上げて通知します。
+ * ★変更点：リマインドもカードで送る
+ */
+/**
+ * 4. リマインド実行 (修正版：期限切れ・今日・明日を区別)
  */
 function sendReminders() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -141,51 +189,83 @@ function sendReminders() {
   }
 
   const data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
-  const today = new Date();
-  today.setHours(0,0,0,0); // 時間をリセットして日付比較
   
-  let alertTasks = [];
+  // 日付比較用の基準日作成（時間を00:00:00に統一）
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  
+  let alertCount = 0;
+  const webhookUrl = getWebhookUrl();
+
+  if (!webhookUrl) {
+    Browser.msgBox("Webhook URL未設定");
+    return;
+  }
 
   data.forEach(row => {
     const taskName = row[CONFIG.COL_TASK_NAME - 1];
     const deadlineStr = row[CONFIG.COL_DEADLINE - 1];
     const status   = row[CONFIG.COL_STATUS - 1];
+    const assignee = row[CONFIG.COL_ASSIGNEE - 1];
 
-    // 完了済みと空行は無視
-    if (status === "🟢 完了" || !taskName) return;
+    // 完了済み、タスク名なし、期限なしは無視
+    if (status === "🟢 完了" || !taskName || !deadlineStr) return;
 
     const deadline = new Date(deadlineStr);
-    
-    // 期限切れチェック (期限 < 今日)
-    if (deadline < today && deadlineStr) {
-      const dateStr = Utilities.formatDate(deadline, 'JST', 'MM/dd');
-      alertTasks.push(`・🔥 ${taskName} (期限: ${dateStr}) -> ${status}`);
+    deadline.setHours(0,0,0,0);
+
+    // 判定ロジック
+    let title = "";
+    let iconUrl = "";
+    let isTarget = false;
+
+    if (deadline.getTime() < today.getTime()) {
+      // ① 期限切れ
+      title = "🔥 【遅延】期限が過ぎています！";
+      iconUrl = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/local_fire_department/default/48px.png"; // 火
+      isTarget = true;
+    } else if (deadline.getTime() === today.getTime()) {
+      // ② 今日が期限
+      title = "⏰ 【今日】本日が対応期限です";
+      iconUrl = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/alarm/default/48px.png"; // 時計
+      isTarget = true;
+    } else if (deadline.getTime() === tomorrow.getTime()) {
+      // ③ 明日が期限
+      title = "⚠️ 【明日】明日が期限です";
+      iconUrl = "https://fonts.gstatic.com/s/i/short_term/release/materialsymbolsoutlined/upcoming/default/48px.png"; // 今後の予定
+      isTarget = true;
+    }
+
+    // 送信処理
+    if (isTarget) {
+       let payload = createCardPayload(taskName, assignee, deadline, status);
+       
+       // ヘッダーをアラート用に上書き
+       payload.cardsV2[0].card.header.title = title;
+       payload.cardsV2[0].card.header.imageUrl = iconUrl;
+       // アイコンを大きく強調表示
+       payload.cardsV2[0].card.header.imageType = "SQUARE"; 
+       
+       sendCard(webhookUrl, payload);
+       alertCount++;
+       Utilities.sleep(500); 
     }
   });
 
-  if (alertTasks.length > 0) {
-    const webhookUrl = getWebhookUrl();
-    if (!webhookUrl) {
-      Browser.msgBox("Webhook URLが設定されていません");
-      return;
-    }
-    
-    const msg = `*🔴 【期限アラート】以下のタスクが遅延しています*\n` + 
-                alertTasks.join("\n") + 
-                `\n\n<${ss.getUrl()}|📂 至急確認してください>`;
-    
-    sendChat(webhookUrl, msg);
-    Browser.msgBox(`送信完了：${alertTasks.length}件の遅延タスクを通知しました。`);
+  if(alertCount > 0) {
+    Browser.msgBox(`送信完了：${alertCount}件のリマインドを送信しました`);
   } else {
-    Browser.msgBox("現在、期限切れのタスクはありません。優秀です！");
+    Browser.msgBox("リマインド対象（遅延・今日・明日）はありません");
   }
 }
 
-/* --- 以下、ユーティリティ関数 --- */
+/* --- ユーティリティ --- */
 
-// Chat送信
-function sendChat(url, text) {
-  const payload = { text: text };
+// カード送信関数（JSONをそのまま送る）
+function sendCard(url, payload) {
   const options = {
     method: 'post',
     contentType: 'application/json',
@@ -194,24 +274,19 @@ function sendChat(url, text) {
   UrlFetchApp.fetch(url, options);
 }
 
-// Webhook URL取得
 function getWebhookUrl() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_SETTING);
   return sheet.getRange(CONFIG.CELL_WEBHOOK).getValue();
 }
 
-// ユーザーマスタ取得
 function getUserMap() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_SETTING);
   const data = sheet.getRange(CONFIG.RANGE_USER_MAP).getValues();
   let map = {};
-  data.forEach(row => {
-    if(row[0] && row[1]) map[row[0]] = row[1];
-  });
+  data.forEach(row => { if(row[0] && row[1]) map[row[0]] = row[1]; });
   return map;
 }
 
-// ログ書き込み
 function writeLog(task, status, user, result) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_LOG);
   const date = Utilities.formatDate(new Date(), 'JST', 'yyyy/MM/dd HH:mm:ss');
