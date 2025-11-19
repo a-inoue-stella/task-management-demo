@@ -1,235 +1,219 @@
-// =================================================================
-// 株式会社クオーレ様向け タスク管理デモ v1.0
-// 目的: スプレッドシート上のボタンからタスクを管理する
-// 作成日: 2025/11/18
-// ドキュメント: task_manager_design_doc_outline.md
-// =================================================================
-
-// --- グローバル設定 ---
-// TODO: 1.1で取得した貴社（ステラリープ社）のテスト用Webhook URLを以下に設定してください
-const WEBHOOK_URL = "https://chat.googleapis.com/v1/spaces/AAQAE5GiV-4/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=Pm8TnLfecpEVKOG8E-FLZ91NTQK--JUUP7gQSPs8GpE";
-const SHEET_NAME_TASKS = "タスク管理";
-const SHEET_NAME_ARCHIVE = "完了タスク";
-const SHEET_NAME_MASTER = "マスタ";
-
-// 通知を何日前に送るか (0 = 当日, 1 = 1日前)
-const DAYS_BEFORE_REMIND = 1; 
-
-// --- 1. メイン機能（ボタン割り当て用） ---
+/**
+ * 【設定エリア】
+ * シートの列番号が変わった場合はここを修正してください。
+ */
+const CONFIG = {
+  SHEET_TASK: 'タスク管理',
+  SHEET_SETTING: '設定',
+  SHEET_LOG: 'ログ',
+  // 列番号（A列=1, B列=2...）
+  COL_TASK_NAME: 2,   // B列: タスク名
+  COL_ASSIGNEE: 3,    // C列: 担当者
+  COL_DEADLINE: 5,    // E列: 期限日
+  COL_STATUS: 6,      // F列: ステータス
+  COL_TRIGGER: 7,     // G列: 通知送信（チェックボックス）
+  // 設定シートのセル位置
+  CELL_WEBHOOK: 'C2',     // Webhook URL
+  RANGE_USER_MAP: 'A2:B20' // 担当者マスタ範囲
+};
 
 /**
- * [ボタンA: リマインド通知]
- * 期限切れ・期限直前のタスクを検知し、Googleチャットに通知カードを送信します。
- * (要件 FR-002 準拠)
+ * 1. トリガー関数 (onEdit)
+ * ユーザーが操作した瞬間に動く関数です。
+ * 負荷対策のため「タスク管理シートのG列がチェックされた時」以外は即終了させます。
  */
-function checkDeadlines() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEET_NAME_TASKS);
-  if (!sheet) {
-    SpreadsheetApp.getUi().alert("エラー: 'タスク管理'シートが見つかりません。");
-    return;
-  }
+function onEdit(e) {
+  const range = e.range;
+  const sheet = range.getSheet();
+
+  // ガード節：無関係な編集は無視して負荷を下げる
+  if (sheet.getName() !== CONFIG.SHEET_TASK) return;
+  if (range.getColumn() !== CONFIG.COL_TRIGGER) return;
+  if (e.value !== "TRUE") return; // チェックON以外（OFFにした時など）は無視
+
+  // 通知処理を実行
+  processNotification(sheet, range.getRow());
+}
+
+/**
+ * 2. 通知処理の実行 (排他制御付き)
+ * 複数人が同時にチェックしてもバッティングしないよう制御します。
+ */
+function processNotification(sheet, rowIndex) {
+  const lock = LockService.getScriptLock();
   
-  const lastRow = sheet.getLastRow();
-  if (lastRow <= 1) {
-    SpreadsheetApp.getUi().alert("タスクがありません。");
-    return;
-  }
-
-  // A列(タスク名), B列(担当者), C列(優先度), D列(ステータス), E列(期限) を取得
-  const dataValues = sheet.getRange(2, 1, lastRow - 1, 5).getValues(); 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0); // 時刻をリセットして日付のみで比較
-
-  let notificationCount = 0;
-
-  for (let i = 0; i < dataValues.length; i++) {
-    const rowData = dataValues[i];
-    const taskName = rowData[0];
-    const assignee = rowData[1];
-    const priority = rowData[2];
-    const status = rowData[3];
-    const dueDateValue = rowData[4];
-
-    // 要件: 未完了かつ期限が設定されている場合のみチェック
-    if (status !== "完了" && dueDateValue instanceof Date) {
-      const dueDate = new Date(dueDateValue);
-      dueDate.setHours(0, 0, 0, 0);
+  // ロック取得（最大10秒待機）
+  if (lock.tryLock(10000)) {
+    try {
+      // 必要なデータを一行分取得
+      // getRange(行, 列, 行数, 列数) -> 1行目のデータ全体を取得
+      const data = sheet.getRange(rowIndex, 1, 1, 10).getValues()[0];
       
-      const diffTime = dueDate.getTime() - today.getTime();
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-      let title = "";
-      let icon = "";
-
-      if (diffDays < 0) {
-        // 期限切れ
-        title = "🚨【警告：期限切れ！】";
-        icon = "WARNING";
-      } else if (diffDays <= DAYS_BEFORE_REMIND) {
-        // 期限直前 (当日含む)
-        title = "⏰【リマインド：対応期限です】";
-        icon = "CLOCK";
+      const taskName = data[CONFIG.COL_TASK_NAME - 1];
+      const assignee = data[CONFIG.COL_ASSIGNEE - 1];
+      const status   = data[CONFIG.COL_STATUS - 1];
+      
+      // 1. メッセージを作る
+      const message = createMessage(taskName, assignee, status);
+      
+      // 2. チャットに送る
+      const webhookUrl = getWebhookUrl();
+      if(webhookUrl) {
+        sendChat(webhookUrl, message);
+        writeLog(taskName, status, assignee, "送信成功");
+      } else {
+        Browser.msgBox("エラー：設定シート(C2)にWebhook URLが設定されていません");
+        writeLog(taskName, status, assignee, "エラー：URL未設定");
       }
 
-      // 通知対象ならカードを送信
-      if (title !== "") {
-        // 該当行へのリンクを生成 (FR-002-03)
-        const rowLink = ss.getUrl() + "#gid=" + sheet.getSheetId() + "&range=A" + (i + 2);
-        // 期限日を読みやすい形式に整形してカードに渡す
-        const timeZone = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone();
-        const dueDateStr = Utilities.formatDate(dueDate, timeZone, 'yyyy/MM/dd');
+      // 3. チェックボックスをOFFに戻す（処理完了の合図）
+      sheet.getRange(rowIndex, CONFIG.COL_TRIGGER).setValue(false);
 
-        const payload = createChatCard(title, taskName, assignee, priority, dueDateStr, rowLink, icon);
-        sendToChat(payload);
-        notificationCount++;
-        Utilities.sleep(500); // 連続送信によるAPI制限を回避
-      }
+      // 4. 完了トーストを表示（画面右下に小さく出る）
+      SpreadsheetApp.getActiveSpreadsheet().toast(`「${taskName}」の通知を送信しました`, "完了");
+
+    } catch (e) {
+      console.error(e);
+      writeLog("システムエラー", "エラー", "不明", e.message);
+      // エラーでもチェックは戻す
+      sheet.getRange(rowIndex, CONFIG.COL_TRIGGER).setValue(false);
+      SpreadsheetApp.getActiveSpreadsheet().toast("エラーが発生しました", "失敗");
+    } finally {
+      lock.releaseLock();
     }
-  }
-
-  // 実行結果をポップアップ (FR-003-03 の思想を流用)
-  if (notificationCount > 0) {
-    SpreadsheetApp.getUi().alert(notificationCount + "件のリマインドを送信しました。");
-  } else {
-    SpreadsheetApp.getUi().alert("リマインド対象のタスクはありませんでした。");
   }
 }
 
 /**
- * [ボタンB: 完了タスク整理]
- * 「完了」ステータスの行を一括でアーカイブシートへ移動します。
- * (要件 FR-003 準拠)
+ * 3. メッセージ生成ロジック
+ * ステータスに応じて文面とアイコンを変えます。
  */
-function archiveCompletedTasks() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sourceSheet = ss.getSheetByName(SHEET_NAME_TASKS);
-  let targetSheet = ss.getSheetByName(SHEET_NAME_ARCHIVE);
-
-  // アーカイブシートがなければ作成 (ヘッダーコピー)
-  if (!targetSheet) {
-    targetSheet = ss.insertSheet(SHEET_NAME_ARCHIVE);
-    sourceSheet.getRange(1, 1, 1, sourceSheet.getLastColumn()).copyTo(targetSheet.getRange(1, 1));
-  }
-
-  const lastRow = sourceSheet.getLastRow();
-  if (lastRow <= 1) {
-    SpreadsheetApp.getUi().alert("タスクがありません。");
-    return;
-  }
-
-  const range = sourceSheet.getRange(2, 1, lastRow - 1, 5); // A-E列
-  const values = range.getValues();
+function createMessage(taskName, assigneeName, status) {
+  const userMap = getUserMap();
+  const email = userMap[assigneeName];
   
-  const rowsToArchive = [];
-  const rowsToDelete = []; // 削除する行番号(インデックスではない)
+  // Emailがあればメンション化、なければ名前だけ
+  const mention = email ? `<users/${email}>` : assigneeName;
+  const sheetUrl = SpreadsheetApp.getActiveSpreadsheet().getUrl();
 
-  // ループは下から順に行う (行削除時のインデックスずれを防ぐため)
-  for (let i = values.length - 1; i >= 0; i--) {
-    const statusColIndex = 3; // D列 (0始まり)
-    if (values[i][statusColIndex] === "完了") {
-      rowsToArchive.unshift(values[i]); // アーカイブ配列に追加
-      rowsToDelete.push(i + 2); // 行番号(1始まり + ヘッダー行)を追加
-    }
+  let header = "";
+  let body = "";
+  
+  if (status === "🟡 確認待ち") {
+    // 確認待ちは目立つように
+    header = `*🟡 【確認依頼】タスクの確認をお願いします*`;
+    body = `担当者：${assigneeName} さんより\nステータスが「確認待ち」になりました。`;
+  } else if (status === "🟢 完了") {
+    // 完了はポジティブに
+    header = `*🟢 【完了】タスクが完了しました！*`;
+    body = `担当者：${mention} お疲れ様でした！`;
+  } else if (status === "🔵 進行中") {
+    header = `*🔵 【着手】タスクを開始しました*`;
+    body = `担当者：${mention}`;
+  } else {
+    // その他
+    header = `*🔄 【更新】タスク状況が変わりました*`;
+    body = `担当者：${mention}\n現在：${status}`;
   }
 
-  if (rowsToArchive.length === 0) {
-    SpreadsheetApp.getUi().alert("完了済みのタスクはありませんでした。");
+  // 統合メッセージ
+  const text = `${header}\n` +
+               `タスク：*${taskName}*\n` +
+               `${body}\n` +
+               `──────────────\n` +
+               `<${sheetUrl}|📂 スプレッドシートを開く>`;
+  
+  return text;
+}
+
+/**
+ * 4. リマインド機能（デモボタン用）
+ * 期限切れタスクを吸い上げて通知します。
+ */
+function sendReminders() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEET_TASK);
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow < 2) {
+    Browser.msgBox("データがありません");
     return;
   }
 
-  // 1. アーカイブシートへ一括書き込み (FR-003-02)
-  targetSheet.getRange(
-    targetSheet.getLastRow() + 1,
-    1,
-    rowsToArchive.length,
-    rowsToArchive[0].length
-  ).setValues(rowsToArchive);
+  const data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
+  const today = new Date();
+  today.setHours(0,0,0,0); // 時間をリセットして日付比較
+  
+  let alertTasks = [];
 
-  // 2. 元シートから行を削除 (下から順に削除するためインデックスずれなし)
-  rowsToDelete.forEach(function(rowIndex) {
-    sourceSheet.deleteRow(rowIndex);
+  data.forEach(row => {
+    const taskName = row[CONFIG.COL_TASK_NAME - 1];
+    const deadlineStr = row[CONFIG.COL_DEADLINE - 1];
+    const status   = row[CONFIG.COL_STATUS - 1];
+
+    // 完了済みと空行は無視
+    if (status === "🟢 完了" || !taskName) return;
+
+    const deadline = new Date(deadlineStr);
+    
+    // 期限切れチェック (期限 < 今日)
+    if (deadline < today && deadlineStr) {
+      const dateStr = Utilities.formatDate(deadline, 'JST', 'MM/dd');
+      alertTasks.push(`・🔥 ${taskName} (期限: ${dateStr}) -> ${status}`);
+    }
   });
 
-  // 3. 完了メッセージ (FR-003-03)
-  SpreadsheetApp.getUi().alert(rowsToArchive.length + "件のタスクをアーカイブしました。\nお疲れ様でした！");
-}
-
-// --- 2. ヘルパー関数 ---
-
-/**
- * Google Chat カード (v2) のJSONペイロードを生成します。
- * (設計書 2.5 準拠)
- * @param {string} headerTitle - カードのヘッダータイトル
- * @param {string} taskName - タスク名
- * @param {string} assignee - 担当者
- * @param {string} priority - 優先度
- * @param {string} dueDateStr - 期限日を整形した文字列（例: "2025/11/18"）
- * @param {string} link - 該当行へのURL
- * @param {string} iconType - "WARNING" または "CLOCK"
- * @return {object} Google Chat Card v2 JSON object
- */
-function createChatCard(headerTitle, taskName, assignee, priority, dueDateStr, link, iconType) {
-  return {
-    "cardsV2": [{
-      "cardId": "task-reminder-" + new Date().getTime(), // 簡易的なユニークID
-      "card": {
-        "header": {
-          "title": headerTitle,
-          "subtitle": "タスク管理Botより",
-          "imageUrl": (iconType === "WARNING") 
-            ? "https://www.gstatic.com/images/icons/material/system/2x/warning_amber_black_48dp.png" 
-            : "https://www.gstatic.com/images/icons/material/system/2x/alarm_black_48dp.png",
-          "imageType": "CIRCLE"
-        },
-        "sections": [{
-          "widgets": [
-            { "decoratedText": { "startIcon": { "knownIcon": "DESCRIPTION" }, "text": "<b>タスク:</b> " + (taskName || "(未設定)") } },
-            { "decoratedText": { "startIcon": { "knownIcon": "PERSON" }, "text": "<b>担当:</b> " + (assignee || "(未設定)") } },
-            { "decoratedText": { "startIcon": { "knownIcon": "TICKET" }, "text": "<b>優先度:</b> " + (priority || "(未設定)") } },
-            { "decoratedText": { "startIcon": { "knownIcon": "CLOCK" }, "text": "<b>期限日:</b> " + (dueDateStr || "(未設定)") } },
-            { "buttonList": { "buttons": [{ "text": "シートを開く", "onClick": { "openLink": { "url": link } } }] } }
-          ]
-        }]
-      }
-    }]
-  };
-}
-
-/**
- * カスタムメニューをスプレッドシートに追加します。
- * - 「タスク管理」メニュー内に実行ボタンを配置します。
- */
-function onOpen(e) {
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu('タスク管理')
-    .addItem('リマインドを送信 (期限チェック)', 'checkDeadlines')
-    .addItem('完了タスクをアーカイブ', 'archiveCompletedTasks')
-    .addToUi();
-}
-
-/**
- * インストール時にもメニューを表示（Add-on 互換）
- */
-function onInstall(e) {
-  onOpen(e);
-}
-
-/**
- * Google Chat Webhookにペイロードを送信します。
- * @param {object} payload - Card v2 JSON object
- */
-function sendToChat(payload) {
-  const options = {
-    "method": "POST",
-    "contentType": "application/json",
-    "payload": JSON.stringify(payload)
-  };
-  try {
-    UrlFetchApp.fetch(WEBHOOK_URL, options);
-  } catch (e) {
-    Logger.log("Google Chatへの通知に失敗しました: " + e);
-    // デモ中はアラートを出すと親切
-    SpreadsheetApp.getUi().alert("Chat通知の送信に失敗しました。\nWebhook URLが正しいか確認してください。");
+  if (alertTasks.length > 0) {
+    const webhookUrl = getWebhookUrl();
+    if (!webhookUrl) {
+      Browser.msgBox("Webhook URLが設定されていません");
+      return;
+    }
+    
+    const msg = `*🔴 【期限アラート】以下のタスクが遅延しています*\n` + 
+                alertTasks.join("\n") + 
+                `\n\n<${ss.getUrl()}|📂 至急確認してください>`;
+    
+    sendChat(webhookUrl, msg);
+    Browser.msgBox(`送信完了：${alertTasks.length}件の遅延タスクを通知しました。`);
+  } else {
+    Browser.msgBox("現在、期限切れのタスクはありません。優秀です！");
   }
+}
+
+/* --- 以下、ユーティリティ関数 --- */
+
+// Chat送信
+function sendChat(url, text) {
+  const payload = { text: text };
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload)
+  };
+  UrlFetchApp.fetch(url, options);
+}
+
+// Webhook URL取得
+function getWebhookUrl() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_SETTING);
+  return sheet.getRange(CONFIG.CELL_WEBHOOK).getValue();
+}
+
+// ユーザーマスタ取得
+function getUserMap() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_SETTING);
+  const data = sheet.getRange(CONFIG.RANGE_USER_MAP).getValues();
+  let map = {};
+  data.forEach(row => {
+    if(row[0] && row[1]) map[row[0]] = row[1];
+  });
+  return map;
+}
+
+// ログ書き込み
+function writeLog(task, status, user, result) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_LOG);
+  const date = Utilities.formatDate(new Date(), 'JST', 'yyyy/MM/dd HH:mm:ss');
+  sheet.appendRow([date, task, status, user, result]);
 }
