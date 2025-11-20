@@ -18,12 +18,13 @@ const CONFIG = {
 
 /**
  * 0. メニューバーの作成 (onOpen)
- * シートを開いた時に自動実行され、メニューバーにカスタムメニューを追加します。
  */
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  ui.createMenu('⚡️ タスク管理デモ') // メニュー名
-    .addItem('🔔 リマインドを実行', 'sendReminders') // 項目名, 実行する関数名
+  ui.createMenu('⚡️ タスク管理デモ')
+    .addItem('🔔 リマインドを実行', 'sendReminders')
+    .addSeparator() // 区切り線
+    .addItem('🤖 AIプラン取り込み', 'importAiPlan') // ★追加
     .addToUi();
 }
 
@@ -261,6 +262,63 @@ function sendReminders() {
     Browser.msgBox(`送信完了：${alertCount}件のリマインドを送信しました`);
   } else {
     Browser.msgBox("リマインド対象はありません");
+  }
+}
+
+/**
+ * 5. AIプラン取り込み機能
+ * Gemが出力したJSONを解析し、タスクを一括追加する
+ */
+function importAiPlan() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    '🤖 AIプラン取り込み', 
+    'Gemが出力したJSONコード（[ ... ]）をここに貼り付けてください：', 
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (response.getSelectedButton() == ui.Button.OK) {
+    const input = response.getResponseText();
+    if (!input) return;
+
+    try {
+      // 1. JSONのクリーニング（Markdown記号の除去）
+      // ユーザーが ```json ... ``` ごとコピーしても動くようにする
+      const cleanJson = input.replace(/```json/g, "").replace(/```/g, "").trim();
+      
+      // 2. パース（解析）
+      const tasks = JSON.parse(cleanJson);
+      
+      if (!Array.isArray(tasks)) {
+        throw new Error("データが配列形式（[...]）ではありません。");
+      }
+
+      // 3. 書き込み用データの生成
+      // シートの列順序に合わせてマッピング: [ID, タスク名, 担当, 開始, 期限, ステータス, 通知, メモ]
+      const newRows = tasks.map(t => [
+        Utilities.getUuid(),          // A列: task_id (自動生成)
+        t.task_name,                  // B列: タスク名
+        t.assignee_name,              // C列: 担当者
+        new Date(t.start_date),       // D列: 開始日
+        new Date(t.due_date),         // E列: 期限日
+        "⚪️ 未着手",                   // F列: ステータス (初期値)
+        false,                        // G列: 通知送信 (OFF)
+        t.description || ""           // H列: メモ (JSONのdescriptionを入れる)
+      ]);
+
+      // 4. シートへの書き込み
+      const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_TASK);
+      const lastRow = sheet.getLastRow();
+      
+      // 一括書き込み（高速化）
+      sheet.getRange(lastRow + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+      
+      // 完了メッセージ
+      ui.alert(`✅ 完了：${newRows.length}件のタスクを追加しました！`);
+
+    } catch(e) {
+      ui.alert(`⚠️ エラー：JSONを読み込めませんでした。\n\n原因: ${e.message}`);
+    }
   }
 }
 
