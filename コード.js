@@ -1,17 +1,15 @@
 /**
- * 【設定エリア】
+ * 【設定エリア】（再掲：ここがないと動きません）
  */
 const CONFIG = {
   SHEET_TASK: 'タスク管理',
   SHEET_SETTING: '設定',
   SHEET_LOG: 'ログ',
-  // 列番号
   COL_TASK_NAME: 2,
   COL_ASSIGNEE: 3,
   COL_DEADLINE: 5,
   COL_STATUS: 6,
   COL_TRIGGER: 7,
-  // 設定シート位置
   CELL_WEBHOOK: 'C2',
   RANGE_USER_MAP: 'A2:B20'
 };
@@ -265,60 +263,182 @@ function sendReminders() {
   }
 }
 
+
 /**
- * 5. AIプラン取り込み機能
- * Gemが出力したJSONを解析し、タスクを一括追加する
+ * 5. AIプラン取り込み機能（HTMLモーダル版・デバッグ強化）
  */
 function importAiPlan() {
-  const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt(
-    '🤖 AIプラン取り込み', 
-    'Gemが出力したJSONコード（[ ... ]）をここに貼り付けてください：', 
-    ui.ButtonSet.OK_CANCEL
-  );
+  console.log("【Client Debug】importAiPlan関数が起動しました"); // ログ1
   
-  if (response.getSelectedButton() == ui.Button.OK) {
-    const input = response.getResponseText();
-    if (!input) return;
+  const htmlString = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <base target="_top">
+        <style>
+          body { font-family: sans-serif; padding: 15px; color: #333; }
+          h3 { margin-top: 0; color: #202124; }
+          textarea { 
+            width: 100%; height: 300px; margin-bottom: 15px; 
+            font-family: monospace; font-size: 12px; border: 1px solid #dadce0; 
+            border-radius: 4px; padding: 8px; box-sizing: border-box;
+          }
+          button { 
+            padding: 10px 24px; background-color: #1a73e8; color: white; 
+            border: none; border-radius: 4px; cursor: pointer; font-weight: bold;
+          }
+          #status { margin-top: 15px; font-weight: bold; font-size: 13px; white-space: pre-wrap; }
+          .error { color: #d93025; }
+        </style>
+      </head>
+      <body>
+        <h3>🤖 AIプラン取り込み（Debug）</h3>
+        <p>Gemが出力したJSONコードを貼り付けてください。</p>
+        <textarea id="jsonInput" placeholder='[ ... ]'></textarea>
+        <br>
+        <button onclick="submitJson()" id="submitBtn">取り込み実行</button>
+        <div id="status"></div>
 
-    try {
-      // 1. JSONのクリーニング（Markdown記号の除去）
-      // ユーザーが ```json ... ``` ごとコピーしても動くようにする
-      const cleanJson = input.replace(/```json/g, "").replace(/```/g, "").trim();
-      
-      // 2. パース（解析）
-      const tasks = JSON.parse(cleanJson);
-      
-      if (!Array.isArray(tasks)) {
-        throw new Error("データが配列形式（[...]）ではありません。");
-      }
+        <script>
+          function submitJson() {
+            const input = document.getElementById('jsonInput').value;
+            const statusDiv = document.getElementById('status');
+            const btn = document.getElementById('submitBtn');
 
-      // 3. 書き込み用データの生成
-      // シートの列順序に合わせてマッピング: [ID, タスク名, 担当, 開始, 期限, ステータス, 通知, メモ]
-      const newRows = tasks.map(t => [
-        Utilities.getUuid(),          // A列: task_id (自動生成)
-        t.task_name,                  // B列: タスク名
-        t.assignee_name,              // C列: 担当者
-        new Date(t.start_date),       // D列: 開始日
-        new Date(t.due_date),         // E列: 期限日
-        "⚪️ 未着手",                   // F列: ステータス (初期値)
-        false,                        // G列: 通知送信 (OFF)
-        t.description || ""           // H列: メモ (JSONのdescriptionを入れる)
-      ]);
+            if (!input.trim()) {
+              statusDiv.innerText = "⚠️ テキストを入力してください";
+              return;
+            }
+            
+            statusDiv.innerText = "🔄 GASへ送信中...";
+            btn.disabled = true;
+            btn.innerText = "処理中...";
 
-      // 4. シートへの書き込み
-      const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_TASK);
-      const lastRow = sheet.getLastRow();
-      
-      // 一括書き込み（高速化）
-      sheet.getRange(lastRow + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
-      
-      // 完了メッセージ
-      ui.alert(`✅ 完了：${newRows.length}件のタスクを追加しました！`);
+            // サーバー側関数の呼び出し
+            google.script.run
+              .withSuccessHandler(onSuccess)
+              .withFailureHandler(onFailure)
+              .processPlanJson(input);
+          }
 
-    } catch(e) {
-      ui.alert(`⚠️ エラー：JSONを読み込めませんでした。\n\n原因: ${e.message}`);
+          function onSuccess(resultMsg) {
+            document.getElementById('status').innerText = resultMsg;
+            document.getElementById('submitBtn').innerText = "完了";
+            // 成功しても閉じずに結果を見せる
+          }
+
+          function onFailure(err) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.className = "error";
+            statusDiv.innerText = "❌ エラー:\\n" + err.message;
+            document.getElementById('submitBtn').disabled = false;
+            document.getElementById('submitBtn').innerText = "再試行";
+          }
+        </script>
+      </body>
+    </html>
+  `;
+
+  const htmlOutput = HtmlService.createHtmlOutput(htmlString)
+    .setWidth(600)
+    .setHeight(550);
+  
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, 'AIプロジェクト・アーキテクト連携');
+}
+
+/**
+ * バックエンド処理（連番ID対応版）
+ */
+function processPlanJson(input) {
+  console.log("【Server Debug】processPlanJsonが呼び出されました");
+
+  try {
+    // 1. JSON抽出
+    const firstBracket = input.indexOf("[");
+    const lastBracket = input.lastIndexOf("]");
+
+    if (firstBracket === -1 || lastBracket === -1 || firstBracket >= lastBracket) {
+      throw new Error("JSON配列（[...]）が見つかりませんでした。");
     }
+
+    const jsonString = input.substring(firstBracket, lastBracket + 1);
+    
+    // 2. パース
+    let tasks;
+    try {
+      tasks = JSON.parse(jsonString);
+    } catch (e) {
+      throw new Error("JSON形式が不正です。\n" + e.message);
+    }
+    
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      throw new Error("タスクが含まれていません。");
+    }
+
+    // 3. ID採番の準備（既存IDの最大値を取得）
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_TASK);
+    if (!sheet) throw new Error(`シート「${CONFIG.SHEET_TASK}」が見つかりません`);
+
+    const existingIds = sheet.getRange("A:A").getValues().flat();
+    let maxIdNum = 0;
+
+    existingIds.forEach(id => {
+      // "TASK-" で始まり、後ろが数字であるものを抽出
+      if (typeof id === 'string' && id.startsWith('TASK-')) {
+        const numPart = parseInt(id.replace('TASK-', ''), 10);
+        if (!isNaN(numPart) && numPart > maxIdNum) {
+          maxIdNum = numPart;
+        }
+      }
+    });
+
+    console.log(`【Server Debug】現在の最大ID番号: ${maxIdNum}`);
+
+    // 4. データ生成（連番ID付与）
+    const newRows = tasks.map((t, index) => {
+      const start = t.start_date ? new Date(t.start_date) : new Date();
+      const due   = t.due_date   ? new Date(t.due_date)   : new Date();
+      
+      // 連番生成: 最大値 + インデックス + 1
+      // ('000' + num).slice(-3) で3桁埋め（001, 010, 100）
+      const nextNum = maxIdNum + index + 1;
+      const newId = 'TASK-' + ('000' + nextNum).slice(-3);
+
+      return [
+        newId,                        // A列: 連番ID (TASK-XXX)
+        t.task_name || "名称未定",      // B列
+        t.assignee_name || "",        // C列
+        start,                        // D列
+        due,                          // E列
+        "⚪️ 未着手",                   // F列
+        false,                        // G列
+        t.description || ""           // H列
+      ];
+    });
+
+    // 5. 書き込み位置の特定（A列基準）
+    // チェックボックス(G列)に惑わされないよう、A列の最終行を探す
+    const columnA = sheet.getRange("A:A").getValues();
+    let lastRow = 0;
+
+    for (let i = columnA.length - 1; i >= 0; i--) {
+      if (columnA[i][0] !== "" && columnA[i][0] != null) {
+        lastRow = i + 1;
+        break;
+      }
+    }
+    if (lastRow < 1) lastRow = 1; // ヘッダー行考慮
+
+    console.log(`【Server Debug】書き込み開始行: ${lastRow + 1}`);
+    
+    // 6. 書き込み実行
+    sheet.getRange(lastRow + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+
+    return `✅ 成功！\n${newRows.length}件のタスクを追加しました。\n(ID: TASK-${('000' + (maxIdNum + 1)).slice(-3)} 〜)`;
+
+  } catch (e) {
+    console.error("【Server Error】", e);
+    throw e;
   }
 }
 
